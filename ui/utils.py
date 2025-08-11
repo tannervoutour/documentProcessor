@@ -53,6 +53,7 @@ class UIUtils:
         # Check if similar metadata already exists
         for existing in st.session_state.recent_metadata:
             if (existing.get('document_type') == metadata.get('document_type') and
+                existing.get('processing_method') == metadata.get('processing_method') and
                 existing.get('machine_names') == metadata.get('machine_names')):
                 return  # Don't add duplicates
         
@@ -223,6 +224,13 @@ class UIUtils:
             elif doc_type not in ['manual', 'diagram', 'sparepartslist', 'spreadsheet', 'plain_document']:
                 doc_errors.append("Invalid document type")
             
+            # Check processing method
+            processing_method = doc.get('Processing Method', '').strip()
+            if not processing_method:
+                doc_errors.append("Processing method required")
+            elif processing_method not in ['markdown', 'plain_text']:
+                doc_errors.append("Invalid processing method")
+            
             if doc_errors:
                 errors.append(f"**{doc['Filename']}**: {', '.join(doc_errors)}")
         
@@ -248,6 +256,7 @@ class UIUtils:
                 'metadata': {
                     'machine_names': machines,
                     'document_type': doc.get('Document Type'),
+                    'processing_method': doc.get('Processing Method', 'markdown'),
                     'basic': False
                 }
             }

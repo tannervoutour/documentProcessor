@@ -21,6 +21,10 @@ fi
 
 # Start Streamlit app
 echo "🌐 Starting Streamlit UI on http://localhost:8501"
-echo "Press Ctrl+C to stop the server"
+echo "Running in background with nohup. Check streamlit.log for output."
+echo "To stop the server, use: pkill -f streamlit"
 
-streamlit run streamlit_app.py --server.headless true --server.port 8501
+nohup streamlit run streamlit_app.py --server.headless true --server.port 8501 > streamlit.log 2>&1 &
+
+echo "Server started with PID: $!"
+echo "Log file: streamlit.log"

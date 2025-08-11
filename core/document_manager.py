@@ -28,6 +28,11 @@ class DocumentManager:
         else:
             self.logger.warning("n8n webhook not configured - skipping webhook notifications")
     
+    @property
+    def cache(self):
+        """Alias for result_cache for backward compatibility"""
+        return self.result_cache
+    
     def get_unprocessed_documents(self, prefix: str = "") -> List[Document]:
         """
         Compare S3 and Supabase to find unprocessed documents
@@ -276,9 +281,10 @@ class DocumentManager:
                 }
             self.logger.info(f"Successfully downloaded document from S3, content size: {len(content)} bytes")
             
-            # Get appropriate processor
-            self.logger.info(f"Getting processor for document type: {document.document_type}")
-            processor = processor_factory.get_processor(document.document_type)
+            # Get appropriate processor based on processing method
+            processing_method = metadata.get('processing_method', 'markdown')  # Default to markdown
+            self.logger.info(f"Getting processor for processing method: {processing_method} (document type: {document.document_type})")
+            processor = processor_factory.get_processor_by_method(processing_method)
             
             # Process the document
             self.logger.info(f"Starting document processing with {processor.__class__.__name__}")
@@ -432,8 +438,13 @@ class DocumentManager:
         
         if not metadata.get('document_type'):
             errors.append("Document type is required")
-        elif not processor_factory.supports_document_type(metadata['document_type']):
-            errors.append(f"Unsupported document type: {metadata['document_type']}")
+        elif metadata.get('document_type') not in ["manual", "diagram", "sparepartslist", "spreadsheet", "plain_document"]:
+            errors.append(f"Unsupported document type: {metadata.get('document_type')}")
+        
+        # Validate processing method
+        processing_method = metadata.get('processing_method', 'markdown')
+        if not processor_factory.supports_processing_method(processing_method):
+            errors.append(f"Unsupported processing method: {processing_method}")
         
         return errors
     

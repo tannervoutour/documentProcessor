@@ -11,6 +11,7 @@ from .base_processor import BaseProcessor
 from models.document import Document
 from config.settings import settings
 from core.circuit_breaker import CircuitBreakerConfig, circuit_breaker_manager
+from utils.pdf_chunker import PDFChunker, ChunkProcessor
 
 
 logger = logging.getLogger(__name__)
@@ -27,17 +28,21 @@ class DataLabsProcessor(BaseProcessor):
         self.base_url = config.get('base_url', 'https://www.datalab.to/api/v1/marker') if config else 'https://www.datalab.to/api/v1/marker'
         self.timeout = config.get('timeout', 300) if config else 300  # 5 minutes
         self.poll_interval = config.get('poll_interval', 10) if config else 10  # 10 seconds
+        self.max_file_size_mb = config.get('max_file_size_mb', 80) if config else 80  # 80MB max per chunk
         
         if not self.api_key:
             raise ValueError("DataLabs API key not found in settings")
+        
+        # Initialize PDF chunker
+        self.pdf_chunker = PDFChunker(max_chunk_size_mb=self.max_file_size_mb)
         
         # Initialize circuit breaker for DataLabs API
         circuit_config = CircuitBreakerConfig(
             failure_threshold=3,
             recovery_timeout=60,
             success_threshold=2,
-            timeout=30,
-            expected_exceptions=(requests.RequestException, requests.HTTPError, requests.Timeout)
+            timeout=600,  # 10 minutes to handle large files
+            expected_exceptions=(requests.RequestException, requests.HTTPError, requests.Timeout, requests.ConnectionError)
         )
         self.circuit_breaker = circuit_breaker_manager.get_circuit_breaker('datalabs_api', circuit_config)
     
@@ -48,6 +53,7 @@ class DataLabsProcessor(BaseProcessor):
     def process(self, document: Document, content: bytes) -> Dict[str, Any]:
         """
         Process document using DataLabs API for markdown conversion.
+        Large files will be automatically chunked.
         
         Args:
             document: Document metadata
@@ -59,6 +65,41 @@ class DataLabsProcessor(BaseProcessor):
         if not self.validate_content(content):
             raise ValueError("Invalid document content")
         
+        try:
+            # DEBUG: Check actual PDF page count before processing
+            self._debug_pdf_pages(content, document.filename)
+            
+            # Check if file needs chunking
+            file_size_mb = len(content) / (1024 * 1024)
+            
+            if file_size_mb > self.max_file_size_mb:
+                logger.info(f"Large file detected ({file_size_mb:.1f}MB), chunking document: {document.filename}")
+                return self._process_chunked_document(document, content)
+            else:
+                logger.info(f"Processing document normally ({file_size_mb:.1f}MB): {document.filename}")
+                return self._process_single_document(document, content)
+                
+        except Exception as e:
+            logger.error(f"Error processing document {document.filename} with DataLabs: {str(e)}")
+            logger.error(f"Exception type: {type(e).__name__}")
+            logger.error(f"Exception details: {repr(e)}")
+            
+            return {
+                'pages': [],
+                'document_metadata': {
+                    'filename': document.filename,
+                    'document_type': document.document_type,
+                    'processing_method': 'datalabs_api'
+                },
+                'processing_info': {
+                    'success': False,
+                    'error': str(e),
+                    'processor': 'DataLabsProcessor'
+                }
+            }
+    
+    def _process_single_document(self, document: Document, content: bytes) -> Dict[str, Any]:
+        """Process a single document that doesn't need chunking"""
         try:
             # Submit document for processing
             check_url = self._submit_document(document, content)
@@ -90,6 +131,139 @@ class DataLabsProcessor(BaseProcessor):
                     'success': False,
                     'error': str(e),
                     'error_type': type(e).__name__
+                }
+            }
+    
+    def _process_chunked_document(self, document: Document, content: bytes) -> Dict[str, Any]:
+        """Process a large document by chunking it into smaller pieces"""
+        try:
+            # Create chunks
+            chunks = self.pdf_chunker.chunk_pdf(content, document.filename)
+            logger.info(f"Created {len(chunks)} chunks for document: {document.filename}")
+            
+            # DEBUG: Log chunk page ranges
+            for i, chunk in enumerate(chunks):
+                logger.info(f"  Chunk {i+1}: pages {chunk.start_page}-{chunk.end_page} ({chunk.size_bytes} bytes)")
+            
+            # Process each chunk
+            chunk_results = []
+            for i, chunk in enumerate(chunks):
+                logger.info(f"Processing chunk {i+1}/{len(chunks)} for {document.filename} (pages {chunk.start_page}-{chunk.end_page})")
+                
+                # Try processing each chunk with retry logic
+                max_chunk_retries = 2
+                chunk_result = None
+                
+                for retry_attempt in range(max_chunk_retries):
+                    try:
+                        # Create a temporary document object for the chunk
+                        chunk_doc = Document(
+                            filename=chunk.chunk_id,
+                            s3_key=document.s3_key,
+                            file_size=chunk.size_bytes,
+                            last_modified=document.last_modified,
+                            etag=f"{document.etag}_chunk_{i+1}"
+                        )
+                        chunk_doc.document_type = document.document_type
+                        
+                        # Process the chunk
+                        chunk_result = self._process_single_document(chunk_doc, chunk.content)
+                        
+                        # If successful, break out of retry loop
+                        if chunk_result.get('processing_info', {}).get('success', False):
+                            break
+                        else:
+                            # If processing failed but didn't throw exception, log and potentially retry
+                            error_msg = chunk_result.get('processing_info', {}).get('error', 'Unknown error')
+                            logger.warning(f"Chunk {i+1} processing failed (attempt {retry_attempt + 1}): {error_msg}")
+                            if retry_attempt < max_chunk_retries - 1:
+                                time.sleep(2 ** retry_attempt)  # Exponential backoff
+                                continue
+                            else:
+                                # Use the failed result
+                                break
+                                
+                    except Exception as e:
+                        logger.error(f"Error processing chunk {i+1} (attempt {retry_attempt + 1}): {str(e)}")
+                        if retry_attempt < max_chunk_retries - 1:
+                            time.sleep(2 ** retry_attempt)  # Exponential backoff
+                            continue
+                        else:
+                            # Re-raise the exception to be caught by outer try-except
+                            raise
+                
+                if chunk_result:
+                    # Add chunk metadata to preserve page identifiers
+                    chunk_result['chunk_info'] = {
+                        'chunk_id': chunk.chunk_id,
+                        'start_page': chunk.start_page,
+                        'end_page': chunk.end_page,
+                        'size_bytes': chunk.size_bytes
+                    }
+                    
+                    chunk_results.append(chunk_result)
+                else:
+                    # This should not happen, but handle gracefully
+                    logger.error(f"No result obtained for chunk {i+1}")
+                    chunk_results.append({
+                        'pages': [],
+                        'document_metadata': {
+                            'filename': chunk.chunk_id,
+                            'document_type': document.document_type,
+                            'processing_method': 'datalabs_api_chunk'
+                        },
+                        'processing_info': {
+                            'success': False,
+                            'error': 'No result obtained after retries',
+                            'error_type': 'NoResultError',
+                            'processor': 'DataLabsProcessor',
+                            'chunk_details': {
+                                'chunk_number': i+1,
+                                'total_chunks': len(chunks),
+                                'page_range': f"{chunk.start_page}-{chunk.end_page}",
+                                'size_bytes': chunk.size_bytes
+                            }
+                        },
+                        'chunk_info': {
+                            'chunk_id': chunk.chunk_id,
+                            'start_page': chunk.start_page,
+                            'end_page': chunk.end_page,
+                            'size_bytes': chunk.size_bytes
+                        }
+                    })
+            
+            # Get expected page count from original PDF  
+            expected_page_count = None
+            try:
+                import PyPDF2
+                import io
+                pdf_reader = PyPDF2.PdfReader(io.BytesIO(content))
+                expected_page_count = len(pdf_reader.pages)
+                logger.info(f"Expected page count for validation: {expected_page_count}")
+            except Exception as e:
+                logger.warning(f"Could not determine expected page count: {e}")
+            
+            # Combine chunk results while preserving page identifiers
+            combined_result = ChunkProcessor.combine_chunk_results(chunk_results, document.filename, expected_page_count)
+            
+            logger.info(f"Successfully processed chunked document {document.filename}: {len(chunk_results)} chunks, {combined_result['processing_info']['successful_chunks']} successful")
+            
+            return combined_result
+            
+        except Exception as e:
+            logger.error(f"Error processing chunked document {document.filename}: {str(e)}")
+            
+            return {
+                'pages': [],
+                'document_metadata': {
+                    'filename': document.filename,
+                    'document_type': document.document_type,
+                    'processing_method': 'datalabs_api_chunked'
+                },
+                'processing_info': {
+                    'success': False,
+                    'error': f"Chunking failed: {str(e)}",
+                    'processor': 'DataLabsProcessor'
                 }
             }
     
@@ -129,7 +303,7 @@ class DataLabsProcessor(BaseProcessor):
                 headers=headers,
                 files=files,
                 data=data,
-                timeout=30
+                timeout=600  # 10 minutes for large file uploads
             )
             
             if response.status_code != 200:
@@ -166,7 +340,7 @@ class DataLabsProcessor(BaseProcessor):
             response = requests.get(
                 check_url,
                 headers=headers,
-                timeout=30
+                timeout=60  # 1 minute for status checks
             )
             
             if response.status_code != 200:
@@ -200,6 +374,13 @@ class DataLabsProcessor(BaseProcessor):
                     
             except Exception as e:
                 logger.error(f"Error while polling DataLabs: {str(e)}")
+                logger.error(f"Exception type: {type(e).__name__}")
+                
+                # If circuit breaker is open, stop polling
+                if 'circuit breaker' in str(e).lower():
+                    logger.error("Circuit breaker is open, stopping polling")
+                    raise Exception(f"DataLabs API circuit breaker is open: {str(e)}")
+                
                 time.sleep(self.poll_interval)
         
         raise Exception(f"DataLabs processing timed out after {self.timeout} seconds")
@@ -221,9 +402,17 @@ class DataLabsProcessor(BaseProcessor):
         markdown_content = datalabs_result.get('markdown', '')
         page_count = datalabs_result.get('page_count', 1)
         
+        # DEBUG: Log DataLabs response details
+        logger.info(f"DataLabs result for {document.filename}:")
+        logger.info(f"  - Reported page_count: {page_count}")
+        logger.info(f"  - Content length: {len(markdown_content)} characters")
+        logger.info(f"  - Is paginated: {self._is_paginated(markdown_content)}")
+        
         # If pagination is enabled, split by page delimiters
         if self._is_paginated(markdown_content):
             page_sections = self._split_paginated_content(markdown_content)
+            logger.info(f"  - Split into {len(page_sections)} page sections")
+            
             for i, section in enumerate(page_sections):
                 page_number = i + 1
                 page_data = {
@@ -279,19 +468,54 @@ class DataLabsProcessor(BaseProcessor):
     
     def _split_paginated_content(self, content: str) -> List[str]:
         """Split paginated content into individual pages"""
-        # Simple split by common page delimiters
-        # This could be made more sophisticated based on actual DataLabs output
-        if '---' in content:
-            return [page.strip() for page in content.split('---') if page.strip()]
-        elif '\n\n# ' in content:
-            # Split by header patterns
+        # Look for proper page delimiters first
+        import re
+        
+        # DataLabs should use specific page markers when paginate=True
+        # Look for patterns like "Page 1", "PAGE 1", or page break markers
+        page_patterns = [
+            r'\n---+\s*Page\s+\d+\s*---+\n',  # --- Page 1 ---
+            r'\n={3,}\s*Page\s+\d+\s*={3,}\n',  # === Page 1 ===
+            r'\n\*{3,}\s*Page\s+\d+\s*\*{3,}\n',  # *** Page 1 ***
+            r'\n\f',  # Form feed character (page break)
+            r'\n\s*Page\s+\d+\s*\n',  # Standalone "Page N"
+        ]
+        
+        for pattern in page_patterns:
+            if re.search(pattern, content, re.IGNORECASE):
+                # Split by this pattern and clean up
+                pages = re.split(pattern, content, flags=re.IGNORECASE)
+                # Remove empty pages and strip whitespace
+                pages = [page.strip() for page in pages if page.strip()]
+                logger.info(f"Split content using pattern '{pattern}' into {len(pages)} pages")
+                return pages
+        
+        # If no specific page delimiters found, check for section headers but be more conservative
+        # Only split if there are a reasonable number of sections (not too many)
+        if '\n\n# ' in content:
             sections = content.split('\n\n# ')
-            if sections:
+            if len(sections) <= 50:  # Reasonable limit to prevent page explosion
                 pages = [sections[0]]  # First section
                 pages.extend([f'# {section}' for section in sections[1:]])
-                return [page.strip() for page in pages if page.strip()]
+                cleaned_pages = [page.strip() for page in pages if page.strip()]
+                logger.info(f"Split content by headers into {len(cleaned_pages)} sections")
+                return cleaned_pages
+            else:
+                logger.warning(f"Too many header sections ({len(sections)}), treating as single page")
+        
+        # Check for simple --- delimiters but be conservative
+        if '---' in content:
+            potential_pages = content.split('---')
+            # Only split if reasonable number of pages
+            if len(potential_pages) <= 20 and all(len(p.strip()) > 50 for p in potential_pages if p.strip()):
+                pages = [page.strip() for page in potential_pages if page.strip()]
+                logger.info(f"Split content by --- delimiters into {len(pages)} pages")
+                return pages
+            else:
+                logger.warning(f"--- split would create {len(potential_pages)} pages, treating as single page")
         
         # Fallback: return as single page
+        logger.info("No reliable page delimiters found, treating as single page")
         return [content.strip()]
     
     def _save_processing_outputs(self, document: Document, raw_result: Dict[str, Any], structured_result: Dict[str, Any]) -> None:
@@ -373,3 +597,28 @@ class DataLabsProcessor(BaseProcessor):
             Circuit breaker statistics
         """
         return self.circuit_breaker.get_stats()
+    
+    def _debug_pdf_pages(self, pdf_content: bytes, filename: str) -> None:
+        """Debug function to check actual PDF page count"""
+        try:
+            import PyPDF2
+            import io
+            
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_content))
+            actual_page_count = len(pdf_reader.pages)
+            
+            logger.info(f"DEBUG: PDF {filename} actual page count: {actual_page_count}")
+            
+            # Check first few pages for content
+            for i in range(min(3, actual_page_count)):
+                try:
+                    page = pdf_reader.pages[i]
+                    text = page.extract_text()
+                    logger.debug(f"  Page {i+1}: {len(text)} characters")
+                    if len(text) < 50:
+                        logger.warning(f"  WARNING: Page {i+1} has very little content ({len(text)} chars)")
+                except Exception as e:
+                    logger.warning(f"  Could not extract text from page {i+1}: {e}")
+                    
+        except Exception as e:
+            logger.warning(f"Could not debug PDF pages for {filename}: {e}")

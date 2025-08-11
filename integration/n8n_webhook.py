@@ -375,6 +375,15 @@ class N8nWebhookClient:
         """
         try:
             payload_builder = N8nPayloadBuilder()
+            
+            # Check if processing was successful
+            processing_info = processing_result.get('processing_info', {})
+            if not processing_info.get('success', False):
+                # Send error payload for failed processing
+                error_message = processing_info.get('error', 'Processing failed')
+                self.logger.info(f"Processing failed for {document.filename}, sending error payload: {error_message}")
+                return self.send_processing_error(document, metadata, error_message)
+            
             payload = payload_builder.build_webhook_payload(
                 document, processing_result, metadata
             )

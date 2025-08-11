@@ -26,6 +26,7 @@ class DocumentListComponent:
                 'Last Modified': doc.last_modified,
                 'Machine Names': '',
                 'Document Type': 'manual',
+                'Processing Method': 'markdown',
                 'Status': doc.processing_status,
                 's3_key': doc.s3_key,
                 'file_id': doc.file_id,
@@ -66,10 +67,18 @@ class DocumentListComponent:
             ),
             "Document Type": st.column_config.SelectboxColumn(
                 "Document Type",
-                help="Type of document",
+                help="Type of document (affects payload structure)",
                 options=["manual", "diagram", "sparepartslist", "spreadsheet", "plain_document"],
                 required=True,
                 width="medium"
+            ),
+            "Processing Method": st.column_config.SelectboxColumn(
+                "Processing Method",
+                help="Processing method (independent of document type)",
+                options=["markdown", "plain_text"],
+                required=True,
+                width="medium",
+                default="markdown"
             ),
             "Status": st.column_config.TextColumn(
                 "Status",
@@ -102,7 +111,7 @@ class DocumentListComponent:
             num_rows="fixed",
             key=key,
             use_container_width=True,
-            column_order=["Select", "Filename", "Size (MB)", "Last Modified", "Machine Names", "Document Type", "Status"]
+            column_order=["Select", "Filename", "Size (MB)", "Last Modified", "Machine Names", "Document Type", "Processing Method", "Status"]
         )
         
         # Return selected documents

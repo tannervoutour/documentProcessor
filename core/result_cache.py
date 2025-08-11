@@ -228,6 +228,25 @@ class ResultCache:
             'max_age_hours': self.max_age_hours
         }
     
+    def clear_failed_results(self) -> int:
+        """
+        Clear cache entries for failed processing results.
+        Returns number of entries cleared.
+        """
+        failed_keys = []
+        for cache_key, entry in self._memory_cache.items():
+            processing_info = entry.processing_result.get('processing_info', {})
+            if not processing_info.get('success', False):
+                failed_keys.append(cache_key)
+        
+        for cache_key in failed_keys:
+            self._invalidate_entry(cache_key)
+        
+        if failed_keys:
+            logger.info(f"Cleared {len(failed_keys)} failed cache entries")
+        
+        return len(failed_keys)
+    
     def clear_all(self) -> None:
         """Clear all cache entries"""
         # Clear memory cache

@@ -2,7 +2,7 @@
 Factory for creating appropriate document processors based on document type.
 """
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import logging
 from .base_processor import BaseProcessor
 from .pymupdf_processor import PyMuPDFProcessor
@@ -13,15 +13,21 @@ logger = logging.getLogger(__name__)
 
 
 class ProcessorFactory:
-    """Factory for creating document processors based on document type."""
+    """Factory for creating document processors based on processing method."""
     
-    # Mapping of document types to their processors
+    # Mapping of processing methods to their processors
     PROCESSOR_MAPPING = {
+        'markdown': DataLabsProcessor,  # Rich markdown formatting with DataLabs
+        'plain_text': PyMuPDFProcessor,  # Simple text extraction with PyMuPDF
+    }
+    
+    # Legacy mapping for backward compatibility (deprecated)
+    LEGACY_DOCUMENT_TYPE_MAPPING = {
         'manual': DataLabsProcessor,
         'diagram': PyMuPDFProcessor,
-        'sparepartslist': DataLabsProcessor,  # Changed to DataLabs for markdown processing
-        'spreadsheet': DataLabsProcessor,  # Can be processed by DataLabs or PyMuPDF
-        'plain_document': PyMuPDFProcessor,  # Simple text extraction for small documents
+        'sparepartslist': DataLabsProcessor,
+        'spreadsheet': DataLabsProcessor,
+        'plain_document': PyMuPDFProcessor,
     }
     
     def __init__(self, config: Dict[str, Any] = None):
@@ -34,23 +40,23 @@ class ProcessorFactory:
         self.config = config or {}
         self._processor_instances = {}
     
-    def get_processor(self, document_type: str) -> BaseProcessor:
+    def get_processor_by_method(self, processing_method: str) -> BaseProcessor:
         """
-        Get the appropriate processor for a document type.
+        Get the appropriate processor for a processing method.
         
         Args:
-            document_type: Type of document to process
+            processing_method: Method of processing ('markdown' or 'plain_text')
             
         Returns:
-            Processor instance for the document type
+            Processor instance for the processing method
             
         Raises:
-            ValueError: If document type is not supported
+            ValueError: If processing method is not supported
         """
-        if document_type not in self.PROCESSOR_MAPPING:
-            raise ValueError(f"Unsupported document type: {document_type}")
+        if processing_method not in self.PROCESSOR_MAPPING:
+            raise ValueError(f"Unsupported processing method: {processing_method}. Supported: {list(self.PROCESSOR_MAPPING.keys())}")
         
-        processor_class = self.PROCESSOR_MAPPING[document_type]
+        processor_class = self.PROCESSOR_MAPPING[processing_method]
         
         # Return cached instance if available
         if processor_class in self._processor_instances:
@@ -62,7 +68,44 @@ class ProcessorFactory:
             processor = processor_class(processor_config)
             self._processor_instances[processor_class] = processor
             
-            logger.info(f"Created processor {processor_class.__name__} for document type: {document_type}")
+            logger.info(f"Created processor {processor_class.__name__} for processing method: {processing_method}")
+            return processor
+            
+        except Exception as e:
+            logger.error(f"Failed to create processor for processing method {processing_method}: {str(e)}")
+            raise
+    
+    def get_processor(self, document_type: str) -> BaseProcessor:
+        """
+        DEPRECATED: Get processor by document type. Use get_processor_by_method instead.
+        
+        Args:
+            document_type: Type of document to process
+            
+        Returns:
+            Processor instance for the document type
+            
+        Raises:
+            ValueError: If document type is not supported
+        """
+        logger.warning(f"Using deprecated get_processor method with document_type: {document_type}. Use get_processor_by_method instead.")
+        
+        if document_type not in self.LEGACY_DOCUMENT_TYPE_MAPPING:
+            raise ValueError(f"Unsupported document type: {document_type}")
+        
+        processor_class = self.LEGACY_DOCUMENT_TYPE_MAPPING[document_type]
+        
+        # Return cached instance if available
+        if processor_class in self._processor_instances:
+            return self._processor_instances[processor_class]
+        
+        # Create new instance
+        try:
+            processor_config = self.config.get(processor_class.__name__, {})
+            processor = processor_class(processor_config)
+            self._processor_instances[processor_class] = processor
+            
+            logger.info(f"Created processor {processor_class.__name__} for document type: {document_type} (legacy)")
             return processor
             
         except Exception as e:
@@ -71,19 +114,40 @@ class ProcessorFactory:
     
     def get_available_processors(self) -> Dict[str, str]:
         """
-        Get mapping of document types to processor names.
+        Get mapping of processing methods to processor names.
         
         Returns:
-            Dictionary mapping document types to processor class names
+            Dictionary mapping processing methods to processor class names
         """
         return {
-            doc_type: processor_class.__name__ 
-            for doc_type, processor_class in self.PROCESSOR_MAPPING.items()
+            method: processor_class.__name__ 
+            for method, processor_class in self.PROCESSOR_MAPPING.items()
         }
+    
+    def get_available_processing_methods(self) -> List[str]:
+        """
+        Get list of available processing methods.
+        
+        Returns:
+            List of supported processing methods
+        """
+        return list(self.PROCESSOR_MAPPING.keys())
+    
+    def supports_processing_method(self, processing_method: str) -> bool:
+        """
+        Check if a processing method is supported.
+        
+        Args:
+            processing_method: Processing method to check
+            
+        Returns:
+            True if processing method is supported
+        """
+        return processing_method in self.PROCESSOR_MAPPING
     
     def supports_document_type(self, document_type: str) -> bool:
         """
-        Check if a document type is supported.
+        DEPRECATED: Check if a document type is supported. Use supports_processing_method instead.
         
         Args:
             document_type: Type of document to check
@@ -91,19 +155,24 @@ class ProcessorFactory:
         Returns:
             True if document type is supported
         """
-        return document_type in self.PROCESSOR_MAPPING
+        return document_type in self.LEGACY_DOCUMENT_TYPE_MAPPING
     
-    def get_processor_for_document(self, document) -> BaseProcessor:
+    def get_processor_for_document(self, document, processing_method: str = None) -> BaseProcessor:
         """
-        Get processor for a specific document based on its type.
+        Get processor for a specific document.
         
         Args:
-            document: Document object with document_type attribute
+            document: Document object
+            processing_method: Processing method to use ('markdown' or 'plain_text')
             
         Returns:
             Appropriate processor instance
         """
-        return self.get_processor(document.document_type)
+        if processing_method:
+            return self.get_processor_by_method(processing_method)
+        else:
+            # Fallback to legacy method (deprecated)
+            return self.get_processor(document.document_type)
     
     def configure_processor(self, processor_name: str, config: Dict[str, Any]) -> None:
         """

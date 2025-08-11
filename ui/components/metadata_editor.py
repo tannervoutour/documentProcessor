@@ -8,7 +8,7 @@ class MetadataEditor:
     def render_document_type_selector(
         current_type: str = "manual",
         key: str = "doc_type",
-        help_text: str = "Select the document type"
+        help_text: str = "Select the document type for payload formatting"
     ) -> str:
         """Render document type selector"""
         return st.selectbox(
@@ -17,6 +17,22 @@ class MetadataEditor:
             index=["manual", "diagram", "sparepartslist", "spreadsheet", "plain_document"].index(current_type),
             key=key,
             help=help_text
+        )
+    
+    @staticmethod
+    def render_processing_method_selector(
+        current_method: str = "markdown",
+        key: str = "processing_method",
+        help_text: str = "Select the processing method"
+    ) -> str:
+        """Render processing method selector"""
+        return st.selectbox(
+            "Processing Method",
+            options=["markdown", "plain_text"],
+            index=["markdown", "plain_text"].index(current_method),
+            key=key,
+            help=help_text,
+            format_func=lambda x: "DataLabs (Markdown + Images)" if x == "markdown" else "PyMuPDF (Plain Text)"
         )
     
     @staticmethod
@@ -58,7 +74,14 @@ class MetadataEditor:
             doc_type = MetadataEditor.render_document_type_selector(
                 current_type=current_metadata.get('document_type', 'manual'),
                 key=f"type_{document_filename}",
-                help_text="Select the type of document for processing"
+                help_text="Select the document type (affects payload structure)"
+            )
+            
+            # Processing method
+            processing_method = MetadataEditor.render_processing_method_selector(
+                current_method=current_metadata.get('processing_method', 'markdown'),
+                key=f"method_{document_filename}",
+                help_text="Select the processing method independently of document type"
             )
             
             # Machine names
@@ -68,17 +91,23 @@ class MetadataEditor:
                 help_text="Enter all machine names associated with this document"
             )
             
-            # Processing options based on document type
-            st.subheader("Processing Options")
+            # Processing options preview
+            st.subheader("Processing Configuration")
             
-            if doc_type in ['manual', 'sparepartslist', 'spreadsheet']:
-                st.info("📚 Manual/Sparepartslist/Spreadsheet documents will be processed with DataLabs for rich markdown formatting")
-                processor_info = "DataLabs (Markdown + Images)"
-            elif doc_type in ['diagram', 'plain_document']:
-                st.info("📊 Diagram/Plain documents will be processed with PyMuPDF for simple text extraction")
-                processor_info = "PyMuPDF (Simple Text)"
+            col1, col2 = st.columns(2)
+            with col1:
+                st.write("**Document Type:**")
+                st.code(doc_type)
+                st.caption("This determines the payload structure and document-specific fields")
             
-            st.write(f"**Selected Processor:** {processor_info}")
+            with col2:
+                st.write("**Processing Method:**")
+                if processing_method == "markdown":
+                    st.code("DataLabs (Markdown + Images)")
+                    st.caption("Rich markdown formatting with image descriptions")
+                else:
+                    st.code("PyMuPDF (Plain Text)")
+                    st.caption("Simple text extraction with page identifiers")
             
             priority = st.selectbox(
                 "Processing Priority",
@@ -103,6 +132,7 @@ class MetadataEditor:
                 
                 return {
                     'document_type': doc_type,
+                    'processing_method': processing_method,
                     'machine_names': machines,
                     'priority': priority
                 }
@@ -126,7 +156,18 @@ class MetadataEditor:
                 doc_type = st.selectbox(
                     "Document Type",
                     options=["manual", "diagram", "sparepartslist", "spreadsheet", "plain_document"],
-                    disabled=not apply_type
+                    disabled=not apply_type,
+                    help="Document type affects payload structure"
+                )
+                
+                # Common processing method
+                apply_method = st.checkbox("Apply Processing Method to All")
+                processing_method = st.selectbox(
+                    "Processing Method",
+                    options=["markdown", "plain_text"],
+                    disabled=not apply_method,
+                    help="Processing method is independent of document type",
+                    format_func=lambda x: "DataLabs (Markdown + Images)" if x == "markdown" else "PyMuPDF (Plain Text)"
                 )
                 
                 # Common machines
@@ -139,9 +180,10 @@ class MetadataEditor:
             
             with col2:
                 # Processing information
-                st.info("Processing will be automatically determined by document type:")
-                st.write("• **Manual/Sparepartslist/Spreadsheet** → DataLabs (Markdown + Images)")
-                st.write("• **Diagram/Plain** → PyMuPDF (Simple Text)")
+                st.info("Choose processing method independently of document type:")
+                st.write("• **Markdown** → DataLabs (Rich formatting + Images)")
+                st.write("• **Plain Text** → PyMuPDF (Simple text extraction)")
+                st.caption("Document type only affects payload structure, not processing method")
                 
                 apply_priority = st.checkbox("Apply Priority Setting")
                 priority = st.selectbox(
@@ -156,6 +198,9 @@ class MetadataEditor:
                 
                 if apply_type:
                     result['document_type'] = doc_type
+                
+                if apply_method:
+                    result['processing_method'] = processing_method
                 
                 if apply_machines and machines_text.strip():
                     machines = [name.strip() for name in machines_text.split(',')]
@@ -189,12 +234,13 @@ class MetadataEditor:
                 st.write("None set")
         
         with col2:
-            st.write("**Processing Options:**")
-            doc_type = metadata.get('document_type', 'manual')
-            if doc_type in ['manual', 'sparepartslist', 'spreadsheet']:
-                st.write("🔧 **Processor:** DataLabs (Markdown + Images)")
-            elif doc_type in ['diagram', 'plain_document']:
-                st.write("🔧 **Processor:** PyMuPDF (Simple Text)")
+            st.write("**Processing Method:**")
+            processing_method = metadata.get('processing_method', 'markdown')
+            if processing_method == 'markdown':
+                st.code("DataLabs (Markdown + Images)")
+            else:
+                st.code("PyMuPDF (Plain Text)")
+            
             st.write(f"**Priority:** {metadata.get('priority', 'normal')}")
     
     @staticmethod
@@ -217,6 +263,11 @@ class MetadataEditor:
         if metadata.get('document_type') not in valid_types:
             errors.append(f"Document type must be one of: {', '.join(valid_types)}")
         
+        # Validate processing method
+        valid_methods = ["markdown", "plain_text"]
+        if metadata.get('processing_method') not in valid_methods:
+            errors.append(f"Processing method must be one of: {', '.join(valid_methods)}")
+        
         return errors
     
     @staticmethod
@@ -232,26 +283,28 @@ class MetadataEditor:
         """Render processing tips and guidance"""
         with st.expander("📋 Processing Tips"):
             st.write("""
-            **Document Types & Processing:**
+            **Document Types (affects payload structure):**
             - **Manual**: Operating manuals, instruction guides
-              → *Processed with DataLabs for rich markdown with image descriptions*
-            - **Sparepartslist**: Parts lists, component catalogs
-              → *Processed with DataLabs for rich markdown with image descriptions*
+            - **Sparepartslist**: Parts lists, component catalogs  
             - **Spreadsheet**: Excel files, CSV data files
-              → *Processed with DataLabs for rich markdown with image descriptions*
             - **Diagram**: Wiring diagrams, schematics, technical drawings
-              → *Processed with PyMuPDF for simple text extraction with page IDs*
             - **Plain_document**: Simple documents, small files
-              → *Processed with PyMuPDF for simple text extraction with page IDs*
+            
+            **Processing Methods (independent of document type):**
+            - **Markdown (DataLabs)**: Rich markdown formatting with image descriptions
+              → Best for detailed documents needing rich formatting
+            - **Plain Text (PyMuPDF)**: Simple text extraction with page identifiers
+              → Fast processing for simple text extraction
             
             **Machine Names:**
             - Use the exact machine names as they appear in your system
             - Separate multiple machines with commas
             - Examples: `HPM-Ironer1`, `CSP`, `Feeder1-Feeder2`
             
-            **Processing Options:**
+            **Configuration:**
+            - **Document Type**: Determines payload structure and document-specific fields
+            - **Processing Method**: Determines how the document is processed (DataLabs vs PyMuPDF)
             - **Priority**: High priority documents are processed first
-            - Processing method is automatically selected based on document type
             """)
     
     @staticmethod

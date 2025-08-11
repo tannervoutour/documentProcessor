@@ -11,6 +11,7 @@ from models.document import Document
 from ui.components.document_list import DocumentListComponent
 from ui.components.metadata_editor import MetadataEditor
 from ui.components.progress_tracker import ProgressTracker
+from ui.components.cache_manager import CacheManagerComponent
 from ui.utils import UIUtils
 
 class DocumentProcessorApp:
@@ -41,12 +42,6 @@ class DocumentProcessorApp:
     
     def run(self):
         """Main application entry point"""
-        st.set_page_config(
-            page_title="S3 Document Processor",
-            page_icon="📄",
-            layout="wide",
-            initial_sidebar_state="expanded"
-        )
         
         # Main header
         st.markdown('<h1 class="main-header">📄 S3 Document Processor</h1>', unsafe_allow_html=True)
@@ -128,6 +123,20 @@ class DocumentProcessorApp:
     
     def render_main_view(self):
         """Render main document processing view"""
+        # Create tabs for different sections
+        tab1, tab2, tab3 = st.tabs(["📄 Documents", "🗃️ Cache Management", "📊 Statistics"])
+        
+        with tab1:
+            self.render_documents_tab()
+        
+        with tab2:
+            self.render_cache_management_tab()
+        
+        with tab3:
+            self.render_statistics_tab()
+    
+    def render_documents_tab(self):
+        """Render the documents tab"""
         # Document list section
         col1, col2 = st.columns([3, 1])
         
@@ -138,6 +147,89 @@ class DocumentProcessorApp:
         with col2:
             st.header("⚙️ Processing")
             self.render_processing_section()
+    
+    def render_cache_management_tab(self):
+        """Render the cache management tab"""
+        try:
+            # Get all documents for cache management
+            all_documents = (
+                self.doc_manager.get_processed_documents() + 
+                self.doc_manager.get_unprocessed_documents()
+            )
+            
+            # Initialize cache manager
+            cache_manager = CacheManagerComponent(self.doc_manager.result_cache)
+            
+            # Render cache management interface
+            cache_manager.render_full_cache_manager(all_documents)
+            
+        except Exception as e:
+            st.error(f"Error loading cache management: {e}")
+    
+    def render_statistics_tab(self):
+        """Render the statistics tab"""
+        st.header("📊 System Statistics")
+        
+        try:
+            # Get statistics
+            stats = self.doc_manager.get_statistics()
+            
+            if stats:
+                # Processing progress
+                st.subheader("📈 Processing Progress")
+                progress = stats.get('processing_progress', {})
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("Total Documents", progress.get('total_documents', 0))
+                
+                with col2:
+                    st.metric("Processed", progress.get('processed_documents', 0))
+                
+                with col3:
+                    st.metric("Unprocessed", progress.get('unprocessed_documents', 0))
+                
+                with col4:
+                    total = progress.get('total_documents', 0)
+                    processed = progress.get('processed_documents', 0)
+                    if total > 0:
+                        progress_pct = (processed / total) * 100
+                        st.metric("Progress", f"{progress_pct:.1f}%")
+                
+                # Progress bar
+                if total > 0:
+                    st.progress(processed / total, text=f"Processing Progress: {progress_pct:.1f}%")
+                
+                # Document type distribution
+                type_dist = stats.get('document_type_distribution', {})
+                if type_dist:
+                    st.subheader("📋 Document Types")
+                    type_cols = st.columns(len(type_dist))
+                    for i, (doc_type, count) in enumerate(type_dist.items()):
+                        with type_cols[i]:
+                            st.metric(doc_type.title(), count)
+                
+                # Cache statistics
+                st.subheader("📦 Cache Statistics")
+                cache_stats = self.doc_manager.result_cache.get_cache_stats()
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric("Cache Entries", cache_stats.get('total_entries', 0))
+                
+                with col2:
+                    st.metric("Cache Size", f"{cache_stats.get('cache_size_mb', 0):.1f} MB")
+                
+                with col3:
+                    st.metric("Max Age", f"{cache_stats.get('max_age_hours', 0)} hours")
+            
+            else:
+                st.info("No statistics available. Try refreshing the document list.")
+        
+        except Exception as e:
+            st.error(f"Error loading statistics: {e}")
     
     def render_document_section(self):
         """Render document list and management section"""
